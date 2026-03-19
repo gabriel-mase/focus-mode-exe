@@ -1,0 +1,21 @@
+/* Tauri-specific overrides: full-height layout, custom scrollbar */
+* { box-sizing: border-box; }
+
+body {
+  overflow: hidden;
+  height: 100vh;
+  background: #0e0f18;
+  user-select: none;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2b2c3d; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #34354a; }

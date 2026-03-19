@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm --version)",
+      "Read(//c/Users/gabriel/.cargo/bin/**)",
+      "Bash(export PATH=\"$PATH:/c/Users/gabriel/.cargo/bin\")",
+      "Bash(cargo --version)",
+      "Bash(rustc --version)",
+      "Bash(npm create:*)",
+      "Bash(cargo check:*)",
+      "Bash(npm run:*)",
+      "Bash(npm install:*)",
+      "Bash(cd:*)",
+      "Bash($env:PATH += \";$env:USERPROFILE\\\\.cargo\\\\bin\")",
+      "Bash(export PATH=\"$PATH:$HOME/.cargo/bin\")"
+    ]
+  }
+}
