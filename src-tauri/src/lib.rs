@@ -73,7 +73,9 @@ type SharedState = Arc<Mutex<AppState>>;
 
 // ── Background monitor loop ────────────────────────────────────────────────────
 
-fn start_monitor_loop(state: SharedState) {
+type SavedConfig = Arc<Mutex<Option<display::SavedDisplayConfig>>>;
+
+fn start_monitor_loop(state: SharedState, saved_cfg: SavedConfig) {
     thread::spawn(move || {
         use sysinfo::System;
         let mut sys = System::new();
@@ -127,8 +129,15 @@ fn start_monitor_loop(state: SharedState) {
                         .unwrap_or_default();
 
                     if monitors_cfg.is_empty() {
+                        // Default path: DisplaySwitch.exe /internal + /extend is reliable.
                         display::disable_non_primary_monitors();
                     } else {
+                        // Specific monitors path: capture exact current config before
+                        // disabling so we can restore it precisely on game close.
+                        // DisplaySwitch.exe /extend is NOT reliable here because it may
+                        // extend only the currently-active monitors (missing the disabled one).
+                        let snapshot = display::capture_display_config();
+                        *saved_cfg.lock().unwrap() = snapshot;
                         display::disable_specific_monitors(&monitors_cfg);
                     }
 
@@ -136,7 +145,12 @@ fn start_monitor_loop(state: SharedState) {
                 }
                 (None, true) => {
                     // ── Game just closed ───────────────────────────────────
-                    display::restore_all_monitors();
+                    let snapshot = saved_cfg.lock().unwrap().take();
+                    if let Some(cfg) = snapshot {
+                        display::restore_saved_config(cfg);
+                    } else {
+                        display::restore_all_monitors();
+                    }
                     state.lock().unwrap().monitors_switched = false;
                 }
                 _ => {} // no change
@@ -325,12 +339,14 @@ pub fn run() {
         game_monitor_configs: config.game_monitor_configs,
     }));
 
+    let saved_cfg: SavedConfig = Arc::new(Mutex::new(None));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(state.clone())
         .setup(move |app| {
-            start_monitor_loop(state.clone());
+            start_monitor_loop(state.clone(), saved_cfg);
 
             // Restore monitors on clean exit
             let state_exit = state.clone();

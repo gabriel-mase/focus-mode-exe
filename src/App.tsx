@@ -12,6 +12,7 @@ import {
   Popover,
   ScrollArea,
   Stack,
+  Switch,
   Text,
   TextInput,
   Tooltip,
@@ -60,7 +61,6 @@ function MonitorConfigPanel({
   onSave: (deviceNames: string[]) => void;
 }) {
   const secondary = monitors.filter((m) => !m.is_primary);
-  // Empty config = "all secondary" (default). Otherwise, specific device names.
   const isDefault = currentConfig.length === 0;
   const [useDefault, setUseDefault] = useState(isDefault);
   const [selected, setSelected] = useState<string[]>(
@@ -76,41 +76,79 @@ function MonitorConfigPanel({
     onSave(useDefault ? [] : selected);
   }
 
+  const primary = monitors.find((m) => m.is_primary);
+
   if (secondary.length === 0) {
     return (
-      <Box p="xs">
+      <Box p="sm">
         <Text size="xs" c="dimmed">Only one monitor detected</Text>
       </Box>
     );
   }
 
   return (
-    <Stack gap="xs" p={4} style={{ minWidth: 230 }}>
-      <Text size="xs" fw={600} c="indigo.3">
-        Monitors — {game.name}
+    <Stack gap="md" p={4} style={{ minWidth: 300 }}>
+      <Text size="sm" fw={600} c="white">
+        Monitor Settings — {game.name}
       </Text>
 
-      <Checkbox
-        label={<Text size="xs">All secondary (default)</Text>}
+      {/* Primary monitor — informational only */}
+      {primary && (
+        <Box
+          px="sm"
+          py={9}
+          style={{
+            borderRadius: 8,
+            background: "rgba(255,255,255,0.04)",
+            border: "1px solid rgba(255,255,255,0.08)",
+          }}
+        >
+          <Group gap={10} wrap="nowrap" align="flex-start">
+            <IconDeviceDesktop
+              size={16}
+              style={{ marginTop: 2, flexShrink: 0, opacity: 0.45 }}
+            />
+            <Box>
+              <Text size="xs" fw={500} c="gray.2">
+                {primary.friendly_name}{" "}
+                <Text span size="xs" c="orange.4" fw={600}>
+                  (primary)
+                </Text>
+              </Text>
+              <Text size="10px" c="dimmed">
+                {primary.width}×{primary.height} · {primary.refresh_hz} Hz — Active
+              </Text>
+            </Box>
+          </Group>
+        </Box>
+      )}
+
+      {/* Default toggle */}
+      <Switch
+        label={
+          <Text size="xs" c="gray.3" style={{ lineHeight: 1.4 }}>
+            Disable all secondary monitors on game start (default)
+          </Text>
+        }
         checked={useDefault}
         onChange={(e) => handleDefaultChange(e.currentTarget.checked)}
-        size="xs"
+        color="blue"
+        size="sm"
       />
 
+      {/* Per-monitor toggles */}
       {!useDefault && (
-        <Stack gap={4}>
-          <Text size="10px" c="dimmed" tt="uppercase" fw={500}>
-            Disable on game start:
-          </Text>
+        <Stack gap={10}>
           {secondary.map((m) => (
-            <Checkbox
+            <Switch
               key={m.device_name}
-              size="xs"
+              size="sm"
+              color="blue"
               label={
-                <Text size="xs">
-                  {m.friendly_name.split("\\").pop() || m.friendly_name}{" "}
+                <Text size="xs" c="gray.3">
+                  {m.friendly_name}{" "}
                   <Text span size="10px" c="dimmed">
-                    {m.width}×{m.height}
+                    · {m.width}×{m.height}
                   </Text>
                 </Text>
               }
@@ -127,8 +165,15 @@ function MonitorConfigPanel({
         </Stack>
       )}
 
-      <Button size="xs" variant="light" color="indigo" onClick={handleSave} mt={2}>
-        Save
+      <Button
+        size="sm"
+        variant="filled"
+        color="blue"
+        onClick={handleSave}
+        fullWidth
+        radius="md"
+      >
+        Save Changes
       </Button>
     </Stack>
   );
@@ -165,26 +210,27 @@ function GameRow({
 
   return (
     <Box
-      px="sm"
-      py={7}
+      px="md"
+      py={10}
       onClick={() => hasExe && onToggle()}
       style={{
         cursor: hasExe ? "pointer" : "default",
         borderBottom: "1px solid var(--mantine-color-dark-6)",
         borderLeft: isEnabled
-          ? "2px solid var(--mantine-color-indigo-6)"
+          ? "2px solid var(--mantine-color-blue-6)"
           : "2px solid transparent",
-        background: isEnabled ? "rgba(79,91,196,.07)" : undefined,
         transition: "background 0.1s",
       }}
       className="game-row"
     >
       <Group gap="sm" wrap="nowrap">
-        {/* Checkbox */}
+        {/* Circular checkbox */}
         <Checkbox
           checked={isEnabled}
           readOnly
-          size="xs"
+          size="sm"
+          radius="xl"
+          color="blue"
           disabled={!hasExe}
           onClick={(e) => e.stopPropagation()}
           styles={{ input: { cursor: hasExe ? "pointer" : "default" } }}
@@ -195,8 +241,8 @@ function GameRow({
           <Group gap={6} wrap="nowrap">
             <Text
               size="sm"
-              fw={isEnabled ? 500 : 400}
-              c={hasExe ? (isEnabled ? "white" : "gray.3") : "dark.3"}
+              fw={isEnabled ? 600 : 400}
+              c={hasExe ? (isEnabled ? "white" : "gray.4") : "dark.4"}
               style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
             >
               {game.name}
@@ -209,7 +255,7 @@ function GameRow({
           </Group>
           <Text
             size="xs"
-            c={hasExe ? (isEnabled ? "dark.2" : "dark.3") : "dark.5"}
+            c={hasExe ? (isEnabled ? "dark.2" : "dark.4") : "dark.5"}
             style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
             fs={!hasExe ? "italic" : undefined}
           >
@@ -227,14 +273,14 @@ function GameRow({
               position="left-start"
               withArrow
               withinPortal
-              shadow="md"
+              shadow="xl"
             >
               <Popover.Target>
                 <Tooltip label={`${configuredCount} monitor(s) will be disabled`} position="left">
                   <ActionIcon
                     size="sm"
                     variant="subtle"
-                    color="indigo"
+                    color="blue"
                     onClick={(e) => {
                       e.stopPropagation();
                       setPopOpen((o) => !o);
@@ -244,7 +290,13 @@ function GameRow({
                   </ActionIcon>
                 </Tooltip>
               </Popover.Target>
-              <Popover.Dropdown onClick={(e) => e.stopPropagation()}>
+              <Popover.Dropdown
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  background: "var(--mantine-color-dark-8)",
+                  border: "1px solid var(--mantine-color-dark-5)",
+                }}
+              >
                 <MonitorConfigPanel
                   game={game}
                   monitors={monitors}
@@ -264,7 +316,7 @@ function GameRow({
               <ActionIcon
                 size="sm"
                 variant={hasExe ? "subtle" : "light"}
-                color={hasExe ? "gray" : "indigo"}
+                color={hasExe ? "gray" : "blue"}
                 onClick={(e) => {
                   e.stopPropagation();
                   onBrowse(e);
@@ -418,22 +470,22 @@ export default function App() {
   const secondaryMonitors = monitors.filter((m) => !m.is_primary);
 
   return (
-    <Flex direction="column" h="100vh">
+    <Flex direction="column" h="100vh" style={{ background: "var(--mantine-color-dark-9)" }}>
       {/* ── Header ──────────────────────────────────────────────────────── */}
       <Box
         px="md"
         py="xs"
-        style={{ borderBottom: "1px solid var(--mantine-color-dark-5)", flexShrink: 0 }}
+        style={{ borderBottom: "1px solid var(--mantine-color-dark-6)", flexShrink: 0 }}
       >
         <Group justify="space-between" align="center">
           <Stack gap={0}>
             <Group gap={6}>
-              <IconBolt size={16} color="var(--mantine-color-indigo-4)" />
-              <Text size="sm" fw={700} c="indigo.3" style={{ letterSpacing: 0.4 }}>
+              <IconBolt size={16} color="var(--mantine-color-blue-4)" />
+              <Text size="sm" fw={700} c="blue.4" style={{ letterSpacing: 0.4 }}>
                 FOCUS MODE
               </Text>
               {enabledCount > 0 && (
-                <Badge size="xs" variant="dot" color="indigo">
+                <Badge size="xs" variant="dot" color="teal">
                   {enabledCount} active
                 </Badge>
               )}
@@ -459,7 +511,7 @@ export default function App() {
       {/* ── Toolbar ─────────────────────────────────────────────────────── */}
       <Box
         px="sm"
-        py={7}
+        py={8}
         style={{ borderBottom: "1px solid var(--mantine-color-dark-6)", flexShrink: 0 }}
       >
         <Group gap="xs">
@@ -469,14 +521,13 @@ export default function App() {
             placeholder="Search games..."
             value={search}
             onChange={(e) => setSearch(e.currentTarget.value)}
-            leftSection={null}
-            styles={{ input: { background: "var(--mantine-color-dark-8)" } }}
+            styles={{ input: { background: "var(--mantine-color-dark-7)" } }}
           />
           <Tooltip label="Add non-Steam game">
             <Button
               size="xs"
-              variant="light"
-              color="indigo"
+              variant="outline"
+              color="blue"
               leftSection={<IconPlayerPlay size={12} />}
               onClick={startAddCustomGame}
             >
@@ -486,7 +537,7 @@ export default function App() {
           <Tooltip label="Re-scan Steam library">
             <ActionIcon
               size="sm"
-              variant="subtle"
+              variant="outline"
               color="gray"
               onClick={handleRefresh}
               loading={refreshing}
@@ -502,10 +553,18 @@ export default function App() {
         <Box
           px="sm"
           py={7}
-          style={{ borderBottom: "1px solid var(--mantine-color-indigo-9)", flexShrink: 0, background: "rgba(79,91,196,.08)" }}
+          style={{
+            borderBottom: "1px solid var(--mantine-color-blue-9)",
+            flexShrink: 0,
+            background: "rgba(34,139,230,.07)",
+          }}
         >
           <Group gap="xs">
-            <Text size="10px" c="dimmed" style={{ maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <Text
+              size="10px"
+              c="dimmed"
+              style={{ maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+            >
               {pendingExe.path.split(/[\\/]/).pop()}
             </Text>
             <TextInput
@@ -514,7 +573,7 @@ export default function App() {
               size="xs"
               defaultValue={pendingExe.name}
               placeholder="Game name..."
-              styles={{ input: { background: "var(--mantine-color-dark-8)" } }}
+              styles={{ input: { background: "var(--mantine-color-dark-7)" } }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") confirmCustomGame(e.currentTarget.value);
                 if (e.key === "Escape") setPendingExe(null);
@@ -523,7 +582,7 @@ export default function App() {
             <Button
               size="xs"
               variant="filled"
-              color="indigo"
+              color="blue"
               onClick={() => confirmCustomGame(nameRef.current?.value ?? "")}
             >
               Add
@@ -590,9 +649,9 @@ export default function App() {
         </Group>
       </Box>
 
-      {/* Hover style for game rows */}
+      {/* Hover styles */}
       <style>{`
-        .game-row:hover { background: rgba(255,255,255,0.03) !important; }
+        .game-row:hover { background: rgba(255,255,255,0.025) !important; }
         .game-row .row-actions { opacity: 0; transition: opacity 0.15s; }
         .game-row:hover .row-actions { opacity: 1; }
       `}</style>

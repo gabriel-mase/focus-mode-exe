@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonitorInfo {
-    pub device_name: String,   // e.g. r"\\.\DISPLAY1"
+    pub device_name: String, // e.g. r"\\.\DISPLAY1"
     pub friendly_name: String,
     pub width: u32,
     pub height: u32,
@@ -10,26 +10,21 @@ pub struct MonitorInfo {
     pub is_primary: bool,
 }
 
-// ── Win32 constants ────────────────────────────────────────────────────────────
-const DISPLAY_DEVICE_ACTIVE: u32 = 0x00000001;
-const DISPLAY_DEVICE_PRIMARY_DEVICE: u32 = 0x00000004;
-const ENUM_CURRENT_SETTINGS: u32 = 0xFFFF_FFFF;
-const ENUM_REGISTRY_SETTINGS: u32 = 0xFFFF_FFFE;
-const CDS_UPDATEREGISTRY: u32 = 0x0000_0001;
-const CDS_NORESET: u32 = 0x1000_0000;
-const DM_PELSWIDTH: u32 = 0x0008_0000;
-const DM_PELSHEIGHT: u32 = 0x0010_0000;
-const DM_DISPLAYFREQUENCY: u32 = 0x0040_0000;
+// ── Constants ──────────────────────────────────────────────────────────────────
 
-// Saved (width, height, refresh_hz) per device before we disabled it
-#[cfg(windows)]
-fn saved_modes(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, (u32, u32, u32)>> {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    static S: OnceLock<Mutex<HashMap<String, (u32, u32, u32)>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(HashMap::new()))
-}
+// EnumDisplayDevices
+const DISPLAY_DEVICE_ACTIVE: u32 = 0x0000_0001;
+const DISPLAY_DEVICE_PRIMARY_DEVICE: u32 = 0x0000_0004;
+const ENUM_CURRENT_SETTINGS: u32 = 0xFFFF_FFFF;
+
+// QueryDisplayConfig / SetDisplayConfig (CCD API)
+const QDC_ONLY_ACTIVE_PATHS: u32 = 0x0000_0002;
+const SDC_USE_SUPPLIED_DISPLAY_CONFIG: u32 = 0x0000_0020;
+const SDC_APPLY: u32 = 0x0000_0080;
+const SDC_ALLOW_CHANGES: u32 = 0x0000_0400;
+
+// DisplayConfigGetDeviceInfo type
+const DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME: i32 = 1;
 
 // ── Public API ─────────────────────────────────────────────────────────────────
 
@@ -41,8 +36,7 @@ pub fn enumerate_monitors() -> Vec<MonitorInfo> {
 }
 
 pub fn disable_non_primary_monitors() {
-    // DisplaySwitch.exe /internal = "PC screen only" — disables all secondary
-    // monitors. This is the proven, reliable path for the default case.
+    // DisplaySwitch.exe /internal = "PC screen only" — proven, reliable path.
     #[cfg(windows)]
     let _ = std::process::Command::new("DisplaySwitch.exe")
         .arg("/internal")
@@ -53,44 +47,67 @@ pub fn disable_specific_monitors(device_names: &[String]) {
     if device_names.is_empty() {
         disable_non_primary_monitors();
     } else {
-        // Per-monitor Win32 path (used when the user configured specific monitors
-        // per game). Saves original settings before disabling so restore works.
-        disable_and_apply(device_names);
+        // Use the Windows CCD API (SetDisplayConfig) which is what
+        // DisplaySwitch.exe itself uses under the hood.
+        #[cfg(windows)]
+        disable_via_ccd(device_names);
     }
 }
 
 pub fn restore_all_monitors() {
-    // If specific monitors were disabled via Win32, restore their registry entries
-    // first so the values left in the registry are clean (not 0×0).
-    #[cfg(windows)]
-    {
-        let names: Vec<String> = saved_modes().lock().unwrap().keys().cloned().collect();
-        if !names.is_empty() {
-            restore_and_apply(&names);
-        }
-    }
-
-    // DisplaySwitch.exe /extend = "Extend" — re-enables all connected monitors.
+    // DisplaySwitch.exe /extend re-enables all connected monitors.
     #[cfg(windows)]
     let _ = std::process::Command::new("DisplaySwitch.exe")
         .arg("/extend")
         .spawn();
 }
 
-// ── Windows implementation ─────────────────────────────────────────────────────
+/// Opaque snapshot of the active Windows display configuration, captured
+/// before a game starts so the exact layout can be restored on game close.
+/// Using `DisplaySwitch.exe /extend` for restore is unreliable when specific
+/// monitors were disabled via CCD without SDC_SAVE_TO_DATABASE, because
+/// /extend may apply "extend" only over the currently-active monitors rather
+/// than the full pre-game set.
+#[cfg(windows)]
+pub struct SavedDisplayConfig {
+    paths: Vec<ffi::DisplayConfigPathInfo>,
+    modes: Vec<ffi::DisplayConfigModeInfo>,
+}
+
+// SAFETY: the FFI structs contain only integer primitives — no raw pointers.
+#[cfg(windows)]
+unsafe impl Send for SavedDisplayConfig {}
+
+#[cfg(not(windows))]
+pub struct SavedDisplayConfig;
+
+/// Capture the current active display configuration.
+pub fn capture_display_config() -> Option<SavedDisplayConfig> {
+    #[cfg(windows)]
+    return capture_win32();
+    #[cfg(not(windows))]
+    return None;
+}
+
+/// Restore a previously captured display configuration.
+pub fn restore_saved_config(config: SavedDisplayConfig) {
+    #[cfg(windows)]
+    restore_win32(config);
+    #[cfg(not(windows))]
+    let _ = config;
+}
+
+// ── FFI ────────────────────────────────────────────────────────────────────────
 
 #[cfg(windows)]
 mod ffi {
-    //! Raw FFI bindings. We declare the structs and functions ourselves to avoid
-    //! fighting winapi's feature-gated module layout.
-
     use std::os::raw::c_long;
-
     pub type DWORD = u32;
     pub type BOOL = i32;
     pub type LONG = c_long;
 
-    // DISPLAY_DEVICEW — declared in winuser.h, lives in user32.dll
+    // ── EnumDisplayDevices structs ─────────────────────────────────────────────
+
     #[repr(C)]
     pub struct DisplayDeviceW {
         pub cb: DWORD,
@@ -101,32 +118,25 @@ mod ffi {
         pub device_key: [u16; 128],
     }
 
-    // DEVMODEW — simplified version with fields we actually need.
-    // The real struct has unions at the top; we pad those with bytes.
-    // Layout from Windows SDK: first union (display vs printer) is at offset 28.
-    // We only need dmFields, dmPelsWidth, dmPelsHeight, dmDisplayFrequency.
     #[repr(C)]
     pub struct DevModeW {
-        pub dm_device_name: [u16; 32],   // 64 bytes
+        pub dm_device_name: [u16; 32],
         pub dm_spec_version: u16,
         pub dm_driver_version: u16,
         pub dm_size: u16,
         pub dm_driver_extra: u16,
         pub dm_fields: DWORD,
-        // Union 1: 16 bytes (display: dmPosition POINTL(8) + orientation(4) + fixed(4))
-        // We just pad these since we don't use them for disabling
         pub _union1: [u8; 16],
         pub dm_color: i16,
         pub dm_duplex: i16,
         pub dm_y_resolution: i16,
         pub dm_tt_option: i16,
         pub dm_collate: i16,
-        pub dm_form_name: [u16; 32],     // 64 bytes
+        pub dm_form_name: [u16; 32],
         pub dm_log_pixels: u16,
         pub dm_bits_per_pel: DWORD,
         pub dm_pels_width: DWORD,
         pub dm_pels_height: DWORD,
-        // Union 2: 4 bytes
         pub _union2: [u8; 4],
         pub dm_display_frequency: DWORD,
         pub dm_icm_method: DWORD,
@@ -139,8 +149,100 @@ mod ffi {
         pub dm_panning_height: DWORD,
     }
 
+    // ── CCD (SetDisplayConfig) structs ─────────────────────────────────────────
+    //
+    // Sizes verified against Windows SDK headers:
+    //   LUID                           =  8 bytes
+    //   DISPLAYCONFIG_RATIONAL         =  8 bytes
+    //   DISPLAYCONFIG_PATH_SOURCE_INFO = 20 bytes
+    //   DISPLAYCONFIG_PATH_TARGET_INFO = 48 bytes
+    //   DISPLAYCONFIG_PATH_INFO        = 72 bytes
+    //   DISPLAYCONFIG_MODE_INFO        = 64 bytes
+    //   DISPLAYCONFIG_DEVICE_INFO_HEADER = 20 bytes
+    //   DISPLAYCONFIG_SOURCE_DEVICE_NAME = 84 bytes
+
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    pub struct Luid {
+        pub low_part: u32,  // LowPart
+        pub high_part: i32, // HighPart
+    }
+
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    pub struct DisplayConfigRational {
+        pub numerator: u32,
+        pub denominator: u32,
+    }
+
+    /// DISPLAYCONFIG_PATH_SOURCE_INFO (20 bytes)
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    pub struct DisplayConfigPathSourceInfo {
+        pub adapter_id: Luid,   // 8
+        pub id: u32,             // 4
+        pub mode_info_idx: u32,  // 4  (union modeInfoIdx / bitfields — u32 covers both)
+        pub status_flags: u32,   // 4
+    }
+
+    /// DISPLAYCONFIG_PATH_TARGET_INFO (48 bytes)
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    pub struct DisplayConfigPathTargetInfo {
+        pub adapter_id: Luid,                    // 8
+        pub id: u32,                              // 4
+        pub mode_info_idx: u32,                   // 4
+        pub output_technology: u32,               // 4
+        pub rotation: u32,                        // 4
+        pub scaling: u32,                         // 4
+        pub refresh_rate: DisplayConfigRational,  // 8
+        pub scan_line_ordering: u32,              // 4
+        pub target_available: BOOL,               // 4
+        pub status_flags: u32,                    // 4
+    }
+
+    /// DISPLAYCONFIG_PATH_INFO (72 bytes)
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    pub struct DisplayConfigPathInfo {
+        pub source_info: DisplayConfigPathSourceInfo, // 20
+        pub target_info: DisplayConfigPathTargetInfo, // 48
+        pub flags: u32,                                // 4
+    }
+
+    /// DISPLAYCONFIG_MODE_INFO (64 bytes).
+    /// The union (targetMode / sourceMode / desktopImageInfo) is 48 bytes;
+    /// we store it as [u64; 6] to guarantee 8-byte alignment.
+    #[derive(Clone, Copy)]
+    #[repr(C, align(8))]
+    pub struct DisplayConfigModeInfo {
+        pub info_type: u32,   // 4
+        pub id: u32,           // 4
+        pub adapter_id: Luid,  // 8
+        pub _union: [u64; 6],  // 48  (covers all three union variants)
+    }
+
+    /// DISPLAYCONFIG_DEVICE_INFO_HEADER (20 bytes)
+    #[repr(C)]
+    pub struct DisplayConfigDeviceInfoHeader {
+        pub info_type: i32,   // DISPLAYCONFIG_DEVICE_INFO_TYPE  4
+        pub size: u32,         //                                  4
+        pub adapter_id: Luid,  //                                  8
+        pub id: u32,           //                                  4
+    }
+
+    /// DISPLAYCONFIG_SOURCE_DEVICE_NAME (84 bytes).
+    /// Returned by DisplayConfigGetDeviceInfo; contains the GDI device name
+    /// (e.g. "\\\\.\\DISPLAY2") that matches EnumDisplayDevicesW output.
+    #[repr(C)]
+    pub struct DisplayConfigSourceDeviceName {
+        pub header: DisplayConfigDeviceInfoHeader, // 20
+        pub view_gdi_device_name: [u16; 32],       // 64  (CCHDEVICENAME = 32 WCHARs)
+    }
+
     #[link(name = "user32")]
     extern "system" {
+        // ── Enumerate monitors ──────────────────────────────────────────────────
         pub fn EnumDisplayDevicesW(
             lp_device: *const u16,
             i_dev_num: DWORD,
@@ -154,15 +256,37 @@ mod ffi {
             lp_dev_mode: *mut DevModeW,
         ) -> BOOL;
 
-        pub fn ChangeDisplaySettingsExW(
-            lpsz_device_name: *const u16,
-            lp_dev_mode: *mut DevModeW,
-            hwnd: *mut std::ffi::c_void,
-            dw_flags: DWORD,
-            l_param: *mut std::ffi::c_void,
+        // ── CCD API ────────────────────────────────────────────────────────────
+        pub fn GetDisplayConfigBufferSizes(
+            flags: u32,
+            num_path_array_elements: *mut u32,
+            num_mode_info_array_elements: *mut u32,
+        ) -> LONG;
+
+        pub fn QueryDisplayConfig(
+            flags: u32,
+            num_path_array_elements: *mut u32,
+            path_array: *mut DisplayConfigPathInfo,
+            num_mode_info_array_elements: *mut u32,
+            mode_info_array: *mut DisplayConfigModeInfo,
+            current_topology_id: *mut u32,
+        ) -> LONG;
+
+        pub fn SetDisplayConfig(
+            num_path_array_elements: u32,
+            path_array: *mut DisplayConfigPathInfo,
+            num_mode_info_array_elements: u32,
+            mode_info_array: *mut DisplayConfigModeInfo,
+            flags: u32,
+        ) -> LONG;
+
+        pub fn DisplayConfigGetDeviceInfo(
+            request_packet: *mut DisplayConfigDeviceInfoHeader,
         ) -> LONG;
     }
 }
+
+// ── Windows implementation ─────────────────────────────────────────────────────
 
 #[cfg(windows)]
 fn enumerate_win32() -> Vec<MonitorInfo> {
@@ -174,9 +298,7 @@ fn enumerate_win32() -> Vec<MonitorInfo> {
         let mut dd: ffi::DisplayDeviceW = unsafe { mem::zeroed() };
         dd.cb = mem::size_of::<ffi::DisplayDeviceW>() as u32;
 
-        let ok = unsafe {
-            ffi::EnumDisplayDevicesW(std::ptr::null(), idx, &mut dd, 0)
-        };
+        let ok = unsafe { ffi::EnumDisplayDevicesW(std::ptr::null(), idx, &mut dd, 0) };
         if ok == 0 {
             break;
         }
@@ -191,12 +313,11 @@ fn enumerate_win32() -> Vec<MonitorInfo> {
 
         let mut dm: ffi::DevModeW = unsafe { mem::zeroed() };
         dm.dm_size = mem::size_of::<ffi::DevModeW>() as u16;
-
         unsafe {
             ffi::EnumDisplaySettingsW(name_wide.as_ptr(), ENUM_CURRENT_SETTINGS, &mut dm);
         }
 
-        // Try to get friendly monitor name via second EnumDisplayDevices call
+        // Try to get a friendly name via the second EnumDisplayDevicesW call
         let mut monitor_dd: ffi::DisplayDeviceW = unsafe { mem::zeroed() };
         monitor_dd.cb = mem::size_of::<ffi::DisplayDeviceW>() as u32;
         let has_monitor =
@@ -221,111 +342,143 @@ fn enumerate_win32() -> Vec<MonitorInfo> {
     monitors
 }
 
-fn disable_and_apply(device_names: &[String]) {
-    // Per-monitor disable via Win32: save current settings first so we can
-    // restore them correctly, then apply 0×0 (disables the output).
-    #[cfg(windows)]
-    {
-        use std::mem;
-        let mut staged = false;
-        for name in device_names {
-            let name_wide = to_wide(name);
+/// Disable specific monitors using the Windows CCD API (SetDisplayConfig).
+/// This is the same API used internally by DisplaySwitch.exe, which is why it
+/// works reliably on Windows 10/11 where ChangeDisplaySettingsEx(0×0) does not.
+///
+/// Strategy:
+///   1. QueryDisplayConfig  — get all currently active display paths
+///   2. For each path, call DisplayConfigGetDeviceInfo to get its GDI device name
+///      (e.g. "\\\\.\\DISPLAY2"), and filter out paths whose device name is in
+///      the to-disable list
+///   3. SetDisplayConfig with only the remaining (to-keep) paths — Windows turns
+///      off any monitor whose path is absent
+///   4. Restore is always handled by DisplaySwitch.exe /extend
+#[cfg(windows)]
+fn disable_via_ccd(device_names_to_disable: &[String]) {
+    use std::mem;
+    unsafe {
+        // Step 1 — allocate buffers
+        let mut num_paths: u32 = 0;
+        let mut num_modes: u32 = 0;
+        if ffi::GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut num_paths, &mut num_modes)
+            != 0
+        {
+            return;
+        }
 
-            // Read current resolution so we can put it back on restore
-            let mut cur: ffi::DevModeW = unsafe { mem::zeroed() };
-            cur.dm_size = mem::size_of::<ffi::DevModeW>() as u16;
-            if unsafe { ffi::EnumDisplaySettingsW(name_wide.as_ptr(), ENUM_CURRENT_SETTINGS, &mut cur) } != 0 {
-                saved_modes().lock().unwrap().insert(
-                    name.clone(),
-                    (cur.dm_pels_width, cur.dm_pels_height, cur.dm_display_frequency),
-                );
-            }
+        let mut paths =
+            vec![mem::zeroed::<ffi::DisplayConfigPathInfo>(); num_paths as usize];
+        let mut modes =
+            vec![mem::zeroed::<ffi::DisplayConfigModeInfo>(); num_modes as usize];
 
-            // Stage the disable (width=0 height=0)
-            let mut dm: ffi::DevModeW = unsafe { mem::zeroed() };
-            dm.dm_size = mem::size_of::<ffi::DevModeW>() as u16;
-            dm.dm_fields = DM_PELSWIDTH | DM_PELSHEIGHT;
-            let ret = unsafe {
-                ffi::ChangeDisplaySettingsExW(
-                    name_wide.as_ptr(),
-                    &mut dm,
-                    std::ptr::null_mut(),
-                    CDS_UPDATEREGISTRY | CDS_NORESET,
-                    std::ptr::null_mut(),
-                )
+        // Step 2 — query active paths
+        if ffi::QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut num_paths,
+            paths.as_mut_ptr(),
+            &mut num_modes,
+            modes.as_mut_ptr(),
+            std::ptr::null_mut(),
+        ) != 0
+        {
+            return;
+        }
+        paths.truncate(num_paths as usize);
+        modes.truncate(num_modes as usize);
+
+        // Step 3 — build the "keep" list by resolving GDI device names
+        let mut paths_to_keep: Vec<ffi::DisplayConfigPathInfo> = Vec::new();
+        for path in &paths {
+            let mut sdn = mem::zeroed::<ffi::DisplayConfigSourceDeviceName>();
+            sdn.header.info_type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+            sdn.header.size =
+                mem::size_of::<ffi::DisplayConfigSourceDeviceName>() as u32;
+            sdn.header.adapter_id = path.source_info.adapter_id;
+            sdn.header.id = path.source_info.id;
+
+            let gdi_name = if ffi::DisplayConfigGetDeviceInfo(
+                // Cast: DisplayConfigSourceDeviceName starts with the header field,
+                // so &sdn == &sdn.header at the same address.
+                &mut sdn as *mut ffi::DisplayConfigSourceDeviceName
+                    as *mut ffi::DisplayConfigDeviceInfoHeader,
+            ) == 0
+            {
+                wstr_to_string(&sdn.view_gdi_device_name)
+            } else {
+                String::new() // can't identify — keep this path
             };
-            if ret == 0 {
-                staged = true;
+
+            if !gdi_name.is_empty() && device_names_to_disable.contains(&gdi_name) {
+                // Omit from paths_to_keep → Windows will disable this monitor
+            } else {
+                paths_to_keep.push(*path);
             }
         }
-        if staged {
-            // Commit all staged changes (both args NULL as MSDN requires)
-            unsafe {
-                ffi::ChangeDisplaySettingsExW(
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    0,
-                    std::ptr::null_mut(),
-                );
-            }
+
+        if paths_to_keep.len() == paths.len() {
+            // No matching device found — nothing to disable
+            return;
         }
+
+        // Step 4 — apply new topology (monitors not in paths_to_keep are disabled).
+        // Intentionally NOT using SDC_SAVE_TO_DATABASE: the disable is session-only
+        // so the "extend" topology in the database stays clean, allowing
+        // DisplaySwitch.exe /extend to restore all monitors correctly on game close.
+        ffi::SetDisplayConfig(
+            paths_to_keep.len() as u32,
+            paths_to_keep.as_mut_ptr(),
+            modes.len() as u32,
+            modes.as_mut_ptr(),
+            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES,
+        );
     }
 }
 
-fn restore_and_apply(device_names: &[String]) {
-    // Restore from the settings we saved before disabling.
-    #[cfg(windows)]
-    {
-        use std::mem;
-        let saved = saved_modes().lock().unwrap().clone();
-        let mut staged = false;
-        for name in device_names {
-            let name_wide = to_wide(name);
-            let mut dm: ffi::DevModeW = unsafe { mem::zeroed() };
-            dm.dm_size = mem::size_of::<ffi::DevModeW>() as u16;
+// ── Capture / restore display config ──────────────────────────────────────────
 
-            // Prefer our saved values; fall back to registry if we have nothing saved
-            if let Some(&(w, h, hz)) = saved.get(name) {
-                dm.dm_fields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
-                dm.dm_pels_width = w;
-                dm.dm_pels_height = h;
-                dm.dm_display_frequency = hz;
-            } else {
-                let ok = unsafe {
-                    ffi::EnumDisplaySettingsW(name_wide.as_ptr(), ENUM_REGISTRY_SETTINGS, &mut dm)
-                };
-                if ok == 0 {
-                    continue;
-                }
-            }
+#[cfg(windows)]
+fn capture_win32() -> Option<SavedDisplayConfig> {
+    use std::mem;
+    unsafe {
+        let mut num_paths: u32 = 0;
+        let mut num_modes: u32 = 0;
+        if ffi::GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut num_paths, &mut num_modes)
+            != 0
+        {
+            return None;
+        }
+        let mut paths =
+            vec![mem::zeroed::<ffi::DisplayConfigPathInfo>(); num_paths as usize];
+        let mut modes =
+            vec![mem::zeroed::<ffi::DisplayConfigModeInfo>(); num_modes as usize];
+        if ffi::QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut num_paths,
+            paths.as_mut_ptr(),
+            &mut num_modes,
+            modes.as_mut_ptr(),
+            std::ptr::null_mut(),
+        ) != 0
+        {
+            return None;
+        }
+        paths.truncate(num_paths as usize);
+        modes.truncate(num_modes as usize);
+        Some(SavedDisplayConfig { paths, modes })
+    }
+}
 
-            let ret = unsafe {
-                ffi::ChangeDisplaySettingsExW(
-                    name_wide.as_ptr(),
-                    &mut dm,
-                    std::ptr::null_mut(),
-                    CDS_UPDATEREGISTRY | CDS_NORESET,
-                    std::ptr::null_mut(),
-                )
-            };
-            if ret == 0 {
-                staged = true;
-            }
-        }
-        if staged {
-            unsafe {
-                ffi::ChangeDisplaySettingsExW(
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    0,
-                    std::ptr::null_mut(),
-                );
-            }
-            // Clear saved state after successful restore
-            saved_modes().lock().unwrap().clear();
-        }
+#[cfg(windows)]
+fn restore_win32(mut config: SavedDisplayConfig) {
+    unsafe {
+        ffi::SetDisplayConfig(
+            config.paths.len() as u32,
+            config.paths.as_mut_ptr(),
+            config.modes.len() as u32,
+            config.modes.as_mut_ptr(),
+            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES,
+        );
     }
 }
 
