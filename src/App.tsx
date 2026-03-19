@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import {
   ActionIcon,
   Badge,
@@ -360,11 +362,36 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [pendingExe, setPendingExe] = useState<{ path: string; name: string } | null>(null);
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [updating, setUpdating] = useState(false);
   const nameRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     loadAll();
+    if (isTauri()) checkForUpdates();
   }, []);
+
+  async function checkForUpdates() {
+    try {
+      const update = await check();
+      if (update?.available) setUpdateAvailable(true);
+    } catch {
+      // silently ignore — no internet or no release yet
+    }
+  }
+
+  async function applyUpdate() {
+    setUpdating(true);
+    try {
+      const update = await check();
+      if (update?.available) {
+        await update.downloadAndInstall();
+        await relaunch();
+      }
+    } catch {
+      setUpdating(false);
+    }
+  }
 
   useEffect(() => {
     if (pendingExe) nameRef.current?.focus();
@@ -507,6 +534,34 @@ export default function App() {
           )}
         </Group>
       </Box>
+
+      {/* ── Update banner ───────────────────────────────────────────────── */}
+      {updateAvailable && (
+        <Box
+          px="md"
+          py={6}
+          style={{
+            flexShrink: 0,
+            background: "rgba(34,139,230,0.12)",
+            borderBottom: "1px solid var(--mantine-color-blue-9)",
+          }}
+        >
+          <Group justify="space-between" align="center">
+            <Text size="xs" c="blue.3">
+              Nueva versión disponible
+            </Text>
+            <Button
+              size="xs"
+              variant="light"
+              color="blue"
+              loading={updating}
+              onClick={applyUpdate}
+            >
+              Actualizar y reiniciar
+            </Button>
+          </Group>
+        </Box>
+      )}
 
       {/* ── Toolbar ─────────────────────────────────────────────────────── */}
       <Box
