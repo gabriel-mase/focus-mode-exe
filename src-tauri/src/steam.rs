@@ -29,9 +29,18 @@ pub fn find_steam_games() -> Vec<Game> {
         library_paths.extend(parse_library_folders(&vdf_path));
     }
 
-    // Dedup while preserving order
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    library_paths.retain(|p| seen.insert(p.clone()));
+    // Dedup while preserving order.
+    // Normalize: lowercase + forward→back slashes + strip trailing slash,
+    // because the registry path uses '/' while the VDF uses '\'.
+    let mut seen: HashSet<String> = HashSet::new();
+    library_paths.retain(|p| {
+        let key = p.to_string_lossy()
+            .to_lowercase()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_string();
+        seen.insert(key)
+    });
 
     let mut games = Vec::new();
 
@@ -66,30 +75,78 @@ pub fn find_steam_games() -> Vec<Game> {
 }
 
 fn find_steam_path() -> Option<PathBuf> {
-    let candidates: &[&str] = &[
-        r"C:\Program Files (x86)\Steam",
-        r"C:\Program Files\Steam",
-        r"D:\Steam",
-        r"D:\SteamLibrary",
-        r"E:\Steam",
-        r"E:\SteamLibrary",
-    ];
+    // 1. Windows Registry — Steam always writes its install path here.
+    #[cfg(windows)]
+    {
+        use winreg::enums::*;
+        use winreg::RegKey;
 
-    for path in candidates {
-        let p = PathBuf::from(path);
-        if p.exists() {
-            return Some(p);
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok(key) = hkcu.open_subkey(r"Software\Valve\Steam") {
+            if let Ok(path_str) = key.get_value::<String, _>("SteamPath") {
+                let p = PathBuf::from(path_str);
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+
+        // HKLM fallback (some installs register here instead)
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        for subkey in &[
+            r"SOFTWARE\Valve\Steam",
+            r"SOFTWARE\WOW6432Node\Valve\Steam",
+        ] {
+            if let Ok(key) = hklm.open_subkey(subkey) {
+                if let Ok(path_str) = key.get_value::<String, _>("InstallPath") {
+                    let p = PathBuf::from(path_str);
+                    if p.exists() {
+                        return Some(p);
+                    }
+                }
+            }
         }
     }
 
-    if let Ok(pf) = std::env::var("ProgramFiles(x86)") {
-        let p = PathBuf::from(pf).join("Steam");
-        if p.exists() {
-            return Some(p);
+    // 2. Fallback: enumerate all available drive letters dynamically.
+    let drive_letters = get_available_drives();
+    let common_steam_dirs = ["Steam", "SteamLibrary"];
+
+    for drive in &drive_letters {
+        for dir in &common_steam_dirs {
+            let p = PathBuf::from(format!(r"{}:\{}", drive, dir));
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        // Also check Program Files on each drive
+        for pf in &["Program Files (x86)", "Program Files"] {
+            let p = PathBuf::from(format!(r"{}:\{}\Steam", drive, pf));
+            if p.exists() {
+                return Some(p);
+            }
         }
     }
 
     None
+}
+
+#[cfg(windows)]
+fn get_available_drives() -> Vec<char> {
+    use winapi::um::fileapi::GetLogicalDrives;
+    let mut drives = Vec::new();
+    let mask = unsafe { GetLogicalDrives() };
+    for i in 0u32..26 {
+        if mask & (1 << i) != 0 {
+            drives.push((b'A' + i as u8) as char);
+        }
+    }
+    drives
+}
+
+#[cfg(not(windows))]
+fn get_available_drives() -> Vec<char> {
+    vec![]
 }
 
 fn parse_library_folders(vdf_path: &Path) -> Vec<PathBuf> {

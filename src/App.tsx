@@ -234,7 +234,6 @@ function GameRow({
           radius="xl"
           color="blue"
           disabled={!hasExe}
-          onClick={(e) => e.stopPropagation()}
           styles={{ input: { cursor: hasExe ? "pointer" : "default" } }}
         />
 
