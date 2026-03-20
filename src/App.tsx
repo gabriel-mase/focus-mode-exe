@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -363,11 +364,15 @@ export default function App() {
   const [pendingExe, setPendingExe] = useState<{ path: string; name: string } | null>(null);
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [updating, setUpdating] = useState(false);
+  const [version, setVersion] = useState<string | null>(null);
   const nameRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     loadAll();
-    if (isTauri()) checkForUpdates();
+    if (isTauri()) {
+      checkForUpdates();
+      getVersion().then(setVersion);
+    }
   }, []);
 
   async function checkForUpdates() {
@@ -690,6 +695,9 @@ export default function App() {
               : `Enable games to activate automatic monitor switching`}
           </Text>
           <Group gap={6}>
+            {version && (
+              <Text size="10px" c="dark.5">v{version}</Text>
+            )}
             <Text size="10px" c="dark.5">by</Text>
             <Text
               size="10px"

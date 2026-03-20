@@ -1,6 +1,6 @@
 [package]
 name = "focus-mode-claude"
-version = "0.1.0"
+version = "1.0.1"
 description = "Focus Mode - Automatic monitor manager for gaming"
 authors = ["Gabriel Mase <github.com/gabriel-mase>"]
 edition = "2021"
